@@ -1,0 +1,190 @@
+#!/usr/bin/python
+import socket
+import thread
+import threading
+import os
+import select
+import signal
+import sys
+import time
+from optparse import OptionParser
+
+moniter_connect=[]
+command_list=[]
+localport = None
+serverip = None
+serverport = None
+notpermitfile = None
+notpermitmessage = None
+monitorport = None
+
+def strip_servercommand(server_commandbuf):
+    while server_commandbuf.endswith('\n') or server_commandbuf.endswith('\r') or server_commandbuf.endswith('\0'):
+        server_commandbuf = server_commandbuf[0:len(server_commandbuf)-1]
+    rl = server_commandbuf.rfind('\r')
+    nl = server_commandbuf.rfind('\n')
+    if rl > nl:
+        server_commandbuf = server_commandbuf[rl+1:]
+    else:
+        server_commandbuf = server_commandbuf[nl+1:]
+    return server_commandbuf
+
+def strip_clientcommand(client_commandbuf):
+    while client_commandbuf.endswith('\n') or client_commandbuf.endswith('\r') or client_commandbuf.endswith('\0'):
+        client_commandbuf = client_commandbuf[0:len(client_commandbuf)-1]
+    client_commandbuf = client_commandbuf.split('\t')[0]
+    return client_commandbuf
+
+def check_command(command):
+        global command_list
+        for tmpcommand in command_list:
+                if cmp(tmpcommand, command) == 0:
+                        return True
+        return False
+
+def do_proxy(connection,address):
+        global serverip
+        global serverport
+        global moniter_connect
+        global notpermitmessage
+        server_commandbuf = ''
+        client_commandbuf = ''
+        serversoc = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        serversoc.connect((serverip, int(serverport)))
+        inputs = [connection, serversoc]
+        outputs = []
+        filename = str(address[0])
+        fp = open(filename, 'w')
+        while True:
+                readable , writable , exceptional = select.select(inputs, outputs, inputs)
+                for s in readable :
+                        if s is serversoc:
+                                buf = serversoc.recv(1024)
+                                curtime = time.strftime('%Y-%m-%d %H:%M:%S',time.localtime(time.time()))
+                                writebuf = curtime+' A->['+repr(buf)[1:-1]+']'
+                                fp.write(writebuf)
+                                fp.write('\r\n')
+                                for p in moniter_connect:
+                                    p.send(buf)
+                                server_commandbuf = server_commandbuf + buf
+                                connection.send(buf)
+                        if s is connection:
+                                buf = connection.recv(1024)
+                                curtime = time.strftime('%Y-%m-%d %H:%M:%S',time.localtime(time.time()))
+                                writebuf = curtime+' B->['+repr(buf)[1:-1]+']'
+                                fp.write(writebuf)
+                                fp.write('\r\n')
+                                client_commandbuf = client_commandbuf + buf
+                                if buf[0] == '\r' or buf[0] == '\n':
+                                        server_commandbuf = strip_servercommand(server_commandbuf)
+                                        client_commandbuf = strip_clientcommand(client_commandbuf)
+                                        pos = server_commandbuf.find(client_commandbuf)
+                                        server_commandbuf = server_commandbuf[pos:]
+                                        command = server_commandbuf.split(' ')[0]
+                                        print 'you have input command : ' + command
+                                        if check_command(command) == True:
+                                                print command+' is not permit'
+                                                connection.send('\r\n'+notpermitmessage+'\r\n')
+                                                serversoc.send('\x03')
+                                        server_commandbuf = ''
+                                        client_commandbuf = ''
+                                serversoc.send(buf)
+
+def do_listen():
+    global monitorport
+    global moniter_connect
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(('0.0.0.0', int(monitorport)))
+    sock.listen(5)
+    while True:
+        connection,address = sock.accept()
+        moniter_connect.append(connection)
+
+def startmonitor():
+        listenthread = threading.Thread(target=do_listen)
+        listenthread.setDaemon(True)
+        listenthread.start()
+
+def getnotpermitcommand():
+        global command_list
+        fp = open(notpermitfile, 'r')
+        lines = fp.readlines()
+        fp.close()
+
+        for line in lines:
+                line = strip_clientcommand(line)
+                command_list.append(line)
+
+def paserconfigfile(argv):
+        global localport
+        global serverip
+        global serverport
+        global notpermitfile
+        global notpermitmessage
+        global monitorport
+        parser = OptionParser()
+        parser.add_option("-L", dest="localport", type="string",
+                          help="Local port to listen", metavar="PORT")
+        parser.add_option("-A", dest="serverip", type="string",
+                          help="Server ip to connect", metavar="IPADDR")
+        parser.add_option("-R", dest="serverport", type="string",
+                          help="Server port to connect", metavar="PORT")
+        parser.add_option("-c", dest="notpermitfile", type="string",
+                          help="Not permit command file", metavar="FILE")
+        parser.add_option("-m", dest="notpermitmessage", type="string",
+                          help="Message display when deny command", metavar="STRING")
+        parser.add_option("-M", dest="monitorport", type="string",
+                          help="Monitor port", metavar="PORT")
+        (options, args) = parser.parse_args(argv)
+        if options.localport == None or options.serverip == None or options.serverport == None:
+                print '[localport] and [serverip] and [serverport] must input'
+                sys.exit(0)
+
+        localport = options.localport
+        serverip = options.serverip
+        serverport = options.serverport
+        notpermitfile = options.notpermitfile
+        notpermitmessage = options.notpermitmessage
+        monitorport = options.monitorport
+
+        if notpermitfile != None:
+                getnotpermitcommand()
+        if notpermitmessage == None:
+                notpermitmessage = 'Not permit'
+        for commandname in command_list:
+                print '['+commandname+']'
+
+paserconfigfile(sys.argv)
+
+print localport
+print serverip
+print serverport
+print notpermitfile
+print notpermitmessage
+print monitorport
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.bind(('0.0.0.0', int(localport)))
+sock.listen(5)
+
+if monitorport != None:
+        startmonitor()
+
+while True:
+    connection,address = sock.accept()
+    print address
+    t = threading.Thread(target=do_proxy, args=(connection,address,))
+    t.setDaemon(True)
+    t.start()
+'''
+    child_pid = os.fork()
+    if child_pid == 0:
+            do_proxy(connection)
+    else:
+            connection.close()
+'''
+'''
+        buf = connection.recv(1024)
+        connection.send(buf)
+        connection.close()
+'''
